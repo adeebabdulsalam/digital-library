@@ -1,0 +1,407 @@
+<!doctype html>
+<!--
+  Offline browser prototype (Chrome / Edge): uses the File System Access API.
+  Open this file from disk or serve locally. PDFs open in a new tab via blob URLs;
+  folders cannot open the system file manager from the browser.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Digital Library (browser)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg0: #0a0c10;
+        --text: #e8eaef;
+        --muted: #8b93a5;
+        --accent: #6ee7ff;
+        --border: rgba(255, 255, 255, 0.08);
+        --surface: #1a1f2a;
+        font-family: system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(1200px 800px at 10% -10%, #1a2340 0%, transparent 55%),
+          var(--bg0);
+        color: var(--text);
+        padding: 1.25rem;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        animation: in 0.9s ease both;
+      }
+      @keyframes in {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      h1 {
+        font-size: 1.5rem;
+        margin: 0 0 0.5rem;
+      }
+      p.lead {
+        color: var(--muted);
+        margin: 0 0 1.25rem;
+        font-size: 0.95rem;
+      }
+      .btn {
+        font: inherit;
+        padding: 0.55rem 1rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        cursor: pointer;
+        margin-right: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      .btn-primary {
+        border-color: rgba(110, 231, 255, 0.35);
+      }
+      .search {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(26, 31, 42, 0.85);
+        color: var(--text);
+        margin-bottom: 1rem;
+      }
+      .chip {
+        display: inline-block;
+        padding: 0.3rem 0.65rem;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin: 0 0.35rem 0.35rem 0;
+        cursor: pointer;
+      }
+      .chip:hover {
+        color: var(--accent);
+      }
+      .list {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        background: rgba(18, 21, 28, 0.65);
+      }
+      .row {
+        display: block;
+        width: 100%;
+        padding: 0.65rem 0.85rem;
+        border: none;
+        border-bottom: 1px solid var(--border);
+        background: transparent;
+        color: var(--text);
+        text-align: left;
+        cursor: pointer;
+        font: inherit;
+      }
+      .row:last-child {
+        border-bottom: none;
+      }
+      .row:hover {
+        background: rgba(110, 231, 255, 0.06);
+      }
+      .row small {
+        display: block;
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin-top: 0.2rem;
+      }
+      .hint {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-top: 1rem;
+      }
+      .gear {
+        position: fixed;
+        top: 1rem;
+        right: 1rem;
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body>
+    <button type="button" class="gear" id="settings" title="Library folder" aria-label="Settings">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3" />
+        <path
+          d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+        />
+      </svg>
+    </button>
+    <div class="wrap" id="root"></div>
+    <script type="module">
+      const LS_RECENT = "digitalLibraryRecentSearches";
+      const IDB_NAME = "digital-library-browser";
+      const IDB_STORE = "handles";
+      const MAX_RECENT = 10;
+
+      /** @type {FileSystemDirectoryHandle | null} */
+      let rootHandle = null;
+      /** @type {{ name: string, relativePath: string, isDir: boolean, file?: FileSystemFileHandle }[]} */
+      let entries = [];
+      let categories = [];
+      let query = "";
+
+      function loadRecent() {
+        try {
+          const raw = localStorage.getItem(LS_RECENT);
+          return raw ? JSON.parse(raw) : [];
+        } catch {
+          return [];
+        }
+      }
+      function saveRecent(arr) {
+        localStorage.setItem(LS_RECENT, JSON.stringify(arr.slice(0, MAX_RECENT)));
+      }
+
+      function openDB() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open(IDB_NAME, 1);
+          req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+      async function idbPut(handle) {
+        const db = await openDB();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE, "readwrite");
+          tx.objectStore(IDB_STORE).put(handle, "library");
+          tx.oncomplete = () => resolve(undefined);
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+      async function idbGet() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE, "readonly");
+          const r = tx.objectStore(IDB_STORE).get("library");
+          r.onsuccess = () => resolve(r.result ?? null);
+          r.onerror = () => reject(r.error);
+        });
+      }
+
+      /**
+       * @param {FileSystemDirectoryHandle} dir
+       * @param {string} base
+       */
+      async function walk(dir, base) {
+        const out = [];
+        for await (const [name, handle] of dir.entries()) {
+          if (name.startsWith(".")) continue;
+          const rel = base ? `${base}/${name}` : name;
+          if (handle.kind === "directory") {
+            out.push({ name, relativePath: rel, isDir: true });
+            out.push(...(await walk(handle, rel)));
+          } else {
+            out.push({ name, relativePath: rel, isDir: false, file: handle });
+          }
+        }
+        return out;
+      }
+
+      async function listCategories(dir) {
+        const names = [];
+        for await (const [name, handle] of dir.entries()) {
+          if (name.startsWith(".")) continue;
+          if (handle.kind === "directory") names.push(name);
+        }
+        names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+        return names;
+      }
+
+      async function indexFromHandle(handle) {
+        entries = await walk(handle, "");
+        entries.sort((a, b) =>
+          a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }),
+        );
+        categories = await listCategories(handle);
+      }
+
+      async function pickFolder() {
+        if (!window.showDirectoryPicker) {
+          alert("This browser does not support folder selection. Use Chrome or Edge.");
+          return;
+        }
+        const handle = await window.showDirectoryPicker({ mode: "read" });
+        rootHandle = handle;
+        await idbPut(handle);
+        await indexFromHandle(handle);
+      }
+
+      async function tryRestoreHandle() {
+        const h = await idbGet();
+        if (!h || typeof h.queryPermission !== "function") return false;
+        const perm = await h.queryPermission({ mode: "read" });
+        if (perm !== "granted") {
+          const req = await h.requestPermission({ mode: "read" });
+          if (req !== "granted") return false;
+        }
+        rootHandle = h;
+        await indexFromHandle(h);
+        return true;
+      }
+
+      function filterList() {
+        const q = query.trim().toLowerCase();
+        if (!q) return entries.slice(0, 200);
+        return entries.filter(
+          (e) =>
+            e.name.toLowerCase().includes(q) || e.relativePath.toLowerCase().includes(q),
+        );
+      }
+
+      async function openEntry(e) {
+        if (e.isDir) {
+          alert("Browsers cannot open a folder in the file manager. Use the Tauri app for that.");
+          return;
+        }
+        if (!e.file) return;
+        const f = await e.file.getFile();
+        const url = URL.createObjectURL(f);
+        window.open(url, "_blank", "noopener");
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+
+      function render() {
+        const root = document.getElementById("root");
+        if (!root) return;
+        const recent = loadRecent();
+        const filtered = filterList();
+        const hasRoot = !!rootHandle;
+
+        let html = `<h1>Digital Library</h1><p class="lead">Browser prototype — pick a folder, search, open PDFs in a new tab.</p>`;
+
+        if (!hasRoot) {
+          html += `<p><button type="button" class="btn btn-primary" id="pick">Select library folder</button></p>`;
+        } else {
+          html += `<input type="search" class="search" id="q" placeholder="Search…" value="${escapeAttr(query)}" />`;
+          if (categories.length) {
+            html += `<div id="chips">${categories.map((c) => `<span class="chip" data-c="${escapeAttr(c)}">${escapeHtml(c)}</span>`).join("")}</div>`;
+          }
+          if (recent.length && !query.trim()) {
+            html += `<p style="color:var(--muted);font-size:0.8rem;">Recent: ${recent.map((r) => `<button type="button" class="chip" data-r="${escapeAttr(r)}">${escapeHtml(r)}</button>`).join(" ")}</p>`;
+          }
+          html += `<div class="list" id="list">`;
+          if (filtered.length === 0) {
+            html += `<div class="row">No matches.</div>`;
+          } else {
+            for (const e of filtered) {
+              const key = encodeURIComponent(e.relativePath);
+              const icon = e.isDir ? "📁" : e.name.toLowerCase().endsWith(".pdf") ? "PDF" : "∎";
+              html += `<button type="button" class="row" data-path="${key}">
+                ${icon} ${escapeHtml(e.name)}
+                <small>${escapeHtml(e.relativePath)}</small>
+              </button>`;
+            }
+          }
+          html += `</div>`;
+        }
+
+        html += `<p class="hint">Recent searches are saved in localStorage. Folder access may need to be re-approved after browser restarts.</p>`;
+
+        root.innerHTML = html;
+
+        const pick = document.getElementById("pick");
+        if (pick)
+          pick.addEventListener("click", async () => {
+            await pickFolder();
+            render();
+          });
+
+        const qel = document.getElementById("q");
+        if (qel) {
+          let t;
+          qel.addEventListener("input", () => {
+            query = qel.value;
+            clearTimeout(t);
+            t = setTimeout(render, 250);
+          });
+          qel.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") {
+              const v = query.trim();
+              if (v) {
+                let r = recent.filter((x) => x !== v);
+                r.unshift(v);
+                saveRecent(r);
+              }
+              render();
+            }
+          });
+        }
+
+        root.querySelectorAll(".chip[data-c]").forEach((el) => {
+          el.addEventListener("click", () => {
+            query = el.getAttribute("data-c") || "";
+            render();
+            const inp = document.getElementById("q");
+            if (inp) inp.value = query;
+          });
+        });
+        root.querySelectorAll(".chip[data-r]").forEach((el) => {
+          el.addEventListener("click", () => {
+            query = el.getAttribute("data-r") || "";
+            render();
+            const inp = document.getElementById("q");
+            if (inp) inp.value = query;
+          });
+        });
+
+        root.querySelectorAll(".row[data-path]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const raw = btn.getAttribute("data-path");
+            if (!raw) return;
+            const path = decodeURIComponent(raw);
+            const ent = entries.find((x) => x.relativePath === path);
+            if (ent) await openEntry(ent);
+          });
+        });
+      }
+
+      function escapeHtml(s) {
+        return s
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+      function escapeAttr(s) {
+        return escapeHtml(s).replace(/'/g, "&#39;");
+      }
+
+      document.getElementById("settings")?.addEventListener("click", async () => {
+        await pickFolder();
+        render();
+      });
+
+      (async () => {
+        const ok = await tryRestoreHandle();
+        if (!ok) render();
+        else render();
+      })();
+    </script>
+  </body>
+</html>
