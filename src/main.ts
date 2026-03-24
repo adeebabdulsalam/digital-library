@@ -1,6 +1,9 @@
+import { DotLottie } from "@lottiefiles/dotlottie-web";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Store } from "@tauri-apps/plugin-store";
+
+import splashAnimationUrl from "./assets/girl-with-books.lottie?url";
 
 const STORE_FILE = "library_settings.json";
 /** Browser-only fallback when `vite` is opened outside the Tauri shell (no `invoke`). */
@@ -176,6 +179,10 @@ let appearance: AppearanceSettings = { ...DEFAULT_APPEARANCE };
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 /** Debounce delay for filtering results only — full `render()` is avoided on each keystroke. */
 const SEARCH_DEBOUNCE_MS = 300;
+/** Failsafe if the splash Lottie never fires `complete` (should not happen in practice). */
+const SPLASH_ANIMATION_FAILSAFE_MS = 120_000;
+/** Matches `.splash-out` transition in `styles.css`. */
+const SPLASH_FADE_MS = 450;
 
 const appEl = document.querySelector<HTMLDivElement>("#app");
 if (!appEl) {
@@ -1002,6 +1009,76 @@ function render(): void {
   }
 }
 
+/** Resolves after one full play (`loop: false`) or on load error / failsafe timeout. */
+function waitForSplashAnimationComplete(player: DotLottie | null): Promise<void> {
+  if (!player) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(failsafeTimer);
+      player.removeEventListener("complete", onComplete);
+      player.removeEventListener("loadError", onErr);
+      resolve();
+    };
+
+    const onComplete = () => finish();
+    const onErr = () => finish();
+
+    player.addEventListener("complete", onComplete);
+    player.addEventListener("loadError", onErr);
+
+    const failsafeTimer = setTimeout(() => {
+      finish();
+    }, SPLASH_ANIMATION_FAILSAFE_MS);
+  });
+}
+
+async function runSplashThenBootstrap(): Promise<void> {
+  const splash = document.createElement("div");
+  splash.id = "splash-screen";
+  splash.setAttribute("aria-hidden", "true");
+
+  const stage = document.createElement("div");
+  stage.className = "splash-stage";
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "splash-canvas";
+
+  stage.appendChild(canvas);
+  splash.appendChild(stage);
+  document.body.appendChild(splash);
+
+  let player: DotLottie | null = null;
+  try {
+    player = new DotLottie({
+      canvas,
+      src: splashAnimationUrl,
+      autoplay: true,
+      loop: false,
+      layout: { fit: "contain", align: [0.5, 0.5] },
+      backgroundColor: "transparent",
+      renderConfig: { autoResize: true },
+    });
+  } catch (e) {
+    console.error(e);
+  }
+
+  await Promise.all([bootstrap(), waitForSplashAnimationComplete(player)]);
+
+  splash.classList.add("splash-out");
+  player?.destroy();
+
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, SPLASH_FADE_MS);
+  });
+  splash.remove();
+}
+
 async function bootstrap(): Promise<void> {
   if (inTauri) {
     store = await Store.load(STORE_FILE, {
@@ -1045,4 +1122,4 @@ async function bootstrap(): Promise<void> {
   }
 }
 
-void bootstrap();
+void runSplashThenBootstrap();
