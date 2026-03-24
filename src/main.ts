@@ -27,6 +27,8 @@ let recentSearches: string[] = [];
 let searchQuery = "";
 let settingsOpen = false;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+/** Debounce delay for filtering results only — full `render()` is avoided on each keystroke. */
+const SEARCH_DEBOUNCE_MS = 300;
 
 const appEl = document.querySelector<HTMLDivElement>("#app");
 if (!appEl) {
@@ -159,111 +161,18 @@ async function onResultClick(entry: LibraryEntry): Promise<void> {
   }
 }
 
-function debouncedRenderInput(value: string): void {
+function debouncedSearchInput(value: string): void {
   searchQuery = value;
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
-    render();
-  }, 280);
+    applySearchUi();
+  }, SEARCH_DEBOUNCE_MS);
 }
 
-function render(): void {
+function populateResultsPanel(header: HTMLElement, list: HTMLElement): void {
   const { entries: filtered, truncated } = filterEntries(searchQuery);
   const hasLibrary = Boolean(libraryRoot);
-  const showRecent = recentSearches.length > 0 && !searchQuery.trim();
 
-  app.innerHTML = "";
-
-  const shell = document.createElement("div");
-  shell.className = "shell intro";
-
-  const settingsBtn = document.createElement("button");
-  settingsBtn.type = "button";
-  settingsBtn.className = "btn-icon";
-  settingsBtn.title = "Library settings";
-  settingsBtn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="3"/>
-      <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-    </svg>`;
-  settingsBtn.addEventListener("click", () => {
-    settingsOpen = true;
-    render();
-  });
-
-  const hero = document.createElement("div");
-  hero.className = "hero";
-  hero.innerHTML = `
-    <h1>Digital Library</h1>
-    <p>Browse folders and PDFs offline — search, then open with your system apps.</p>${
-      inTauri
-        ? ""
-        : `<p class="browser-hint">Preview: this page has no Tauri APIs. Use <code>npm run tauri dev</code> for the desktop app.</p>`
-    }`;
-
-  const searchWrap = document.createElement("div");
-  searchWrap.className = "search-wrap";
-  searchWrap.innerHTML = `<svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>`;
-  const input = document.createElement("input");
-  input.type = "search";
-  input.placeholder = hasLibrary
-    ? "Search by file or folder name…"
-    : "Choose a library folder in settings to begin";
-  input.autocomplete = "off";
-  input.value = searchQuery;
-  input.disabled = !hasLibrary;
-  input.addEventListener("input", () => debouncedRenderInput(input.value));
-  input.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") {
-      void persistRecent(searchQuery);
-      render();
-    }
-  });
-  searchWrap.appendChild(input);
-
-  const chips = document.createElement("div");
-  chips.className = "chips";
-  if (hasLibrary && categories.length) {
-    for (const cat of categories) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "chip";
-      chip.textContent = cat;
-      chip.addEventListener("click", () => {
-        searchQuery = cat;
-        debouncedRenderInput(cat);
-        input.value = cat;
-        void persistRecent(cat);
-      });
-      chips.appendChild(chip);
-    }
-  }
-
-  let recentBlock: HTMLElement | null = null;
-  if (showRecent) {
-    recentBlock = document.createElement("div");
-    recentBlock.className = "recent";
-    recentBlock.innerHTML = "<h2>Recent searches</h2>";
-    const tags = document.createElement("div");
-    tags.className = "recent-tags";
-    for (const r of recentSearches) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = r;
-      b.addEventListener("click", () => {
-        searchQuery = r;
-        input.value = r;
-        debouncedRenderInput(r);
-      });
-      tags.appendChild(b);
-    }
-    recentBlock.appendChild(tags);
-  }
-
-  const results = document.createElement("div");
-  results.className = "results";
-  const header = document.createElement("div");
-  header.className = "results-header";
   if (!hasLibrary) {
     header.textContent = "No library folder configured.";
   } else {
@@ -276,10 +185,8 @@ function render(): void {
       header.textContent = `${allEntries.length} items indexed (showing first ${MAX_PREVIEW} until you search)`;
     }
   }
-  results.appendChild(header);
 
-  const list = document.createElement("div");
-  list.className = "results-list";
+  list.replaceChildren();
 
   if (!hasLibrary) {
     const empty = document.createElement("div");
@@ -332,6 +239,160 @@ function render(): void {
       list.appendChild(row);
     }
   }
+}
+
+function syncRecentSection(): void {
+  const recentRoot = document.getElementById("recent-searches");
+  const shouldShow = recentSearches.length > 0 && !searchQuery.trim();
+  if (!recentRoot && shouldShow) {
+    render();
+    return;
+  }
+  if (!recentRoot) return;
+  const show = shouldShow;
+  recentRoot.hidden = !show;
+  if (!show) return;
+  let tags = recentRoot.querySelector<HTMLDivElement>(".recent-tags");
+  if (!tags) {
+    tags = document.createElement("div");
+    tags.className = "recent-tags";
+    recentRoot.appendChild(tags);
+  }
+  tags.replaceChildren();
+  for (const r of recentSearches) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = r;
+    b.addEventListener("click", () => {
+      const input = document.getElementById(
+        "library-search-input",
+      ) as HTMLInputElement | null;
+      searchQuery = r;
+      if (input) input.value = r;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      applySearchUi();
+    });
+    tags.appendChild(b);
+  }
+}
+
+function applySearchUi(): void {
+  const header = document.getElementById("results-header");
+  const list = document.getElementById("results-list");
+  if (!header || !list) {
+    render();
+    return;
+  }
+  populateResultsPanel(header, list);
+  syncRecentSection();
+}
+
+function render(): void {
+  const hasLibrary = Boolean(libraryRoot);
+  const showRecent = recentSearches.length > 0 && !searchQuery.trim();
+
+  app.innerHTML = "";
+
+  const shell = document.createElement("div");
+  shell.className = "shell intro";
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.type = "button";
+  settingsBtn.className = "btn-icon";
+  settingsBtn.title = "Library settings";
+  settingsBtn.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+    </svg>`;
+  settingsBtn.addEventListener("click", () => {
+    settingsOpen = true;
+    render();
+  });
+
+  const hero = document.createElement("div");
+  hero.className = "hero";
+  hero.innerHTML = `
+    <h1>Digital Library</h1>
+    <p>Browse folders and PDFs offline — search, then open with your system apps.</p>${
+      inTauri
+        ? ""
+        : `<p class="browser-hint">Preview: this page has no Tauri APIs. Use <code>npm run tauri dev</code> for the desktop app.</p>`
+    }`;
+
+  const searchWrap = document.createElement("div");
+  searchWrap.className = "search-wrap";
+  searchWrap.innerHTML = `<svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>`;
+  const input = document.createElement("input");
+  input.id = "library-search-input";
+  input.type = "search";
+  input.placeholder = hasLibrary
+    ? "Search by file or folder name…"
+    : "Choose a library folder in settings to begin";
+  input.autocomplete = "off";
+  input.value = searchQuery;
+  input.disabled = !hasLibrary;
+  input.addEventListener("input", () => debouncedSearchInput(input.value));
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      void persistRecent(searchQuery).then(() => applySearchUi());
+    }
+  });
+  searchWrap.appendChild(input);
+
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  if (hasLibrary && categories.length) {
+    for (const cat of categories) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = cat;
+      chip.addEventListener("click", () => {
+        searchQuery = cat;
+        input.value = cat;
+        if (debounceTimer) clearTimeout(debounceTimer);
+        applySearchUi();
+        void persistRecent(cat);
+      });
+      chips.appendChild(chip);
+    }
+  }
+
+  let recentBlock: HTMLElement | null = null;
+  if (showRecent) {
+    recentBlock = document.createElement("div");
+    recentBlock.id = "recent-searches";
+    recentBlock.className = "recent";
+    recentBlock.innerHTML = "<h2>Recent searches</h2>";
+    const tags = document.createElement("div");
+    tags.className = "recent-tags";
+    for (const r of recentSearches) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = r;
+      b.addEventListener("click", () => {
+        searchQuery = r;
+        input.value = r;
+        if (debounceTimer) clearTimeout(debounceTimer);
+        applySearchUi();
+      });
+      tags.appendChild(b);
+    }
+    recentBlock.appendChild(tags);
+  }
+
+  const results = document.createElement("div");
+  results.className = "results";
+  const header = document.createElement("div");
+  header.id = "results-header";
+  header.className = "results-header";
+  results.appendChild(header);
+
+  const list = document.createElement("div");
+  list.id = "results-list";
+  list.className = "results-list";
+  populateResultsPanel(header, list);
   results.appendChild(list);
 
   const status = document.createElement("div");
