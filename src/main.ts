@@ -39,7 +39,7 @@ const DEFAULT_TITLE = "Digital Library";
 
 const DEFAULT_APPEARANCE: AppearanceSettings = {
   themeSource: "preset",
-  presetId: "midnight",
+  presetId: "paper",
   primary: "#6ee7ff",
   secondary: "#c4b5fd",
   appTitle: DEFAULT_TITLE,
